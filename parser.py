@@ -10,9 +10,9 @@ from datetime import datetime
 PHONE_RE = re.compile(r"1[3-9]\d{9}")
 
 # 网址：http(s)、www、裸域名（覆盖常见顶级域；可随样本扩充）
-# ponytail: 域名后只保留 URL 合法 ASCII 字符，防止中文粘连被一起吞入
+# ponytail: 域名前只匹配 ASCII，防止 Python 3 的 \w 把粘连中文一起吞入
 URL_RE = re.compile(
-    r"https?://[a-zA-Z0-9_\-./?=&%+~#@:]+|www\.[a-zA-Z0-9_\-./?=&%+~#@:]+|[\w-]+\.(?:com|cn|net|org|io|co|xyz|top|vip|club|shop|my|中国|公司|网络)[a-zA-Z0-9_\-./?=&%+~#@:]*",
+    r"https?://[a-zA-Z0-9_\-./?=&%+~#@:]+|www\.[a-zA-Z0-9_\-./?=&%+~#@:]+|[a-zA-Z0-9_-]+\.(?:com|cn|net|org|io|co|xyz|top|vip|club|shop|my|中国|公司|网络)[a-zA-Z0-9_\-./?=&%+~#@:]*",
     re.IGNORECASE,
 )
 
