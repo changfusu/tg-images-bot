@@ -297,15 +297,12 @@ async def _send_query_results(message: Message, phone: str):
 
 
 def _format_summary(d):
-    """识别群摘要：仅显示手机号与网址。"""
-    parts = []
-    for label, key in (("发件号码", "sender_number"), ("正文号码", "phone_in_body"), ("网址", "urls")):
-        v = d.get(key) or ""
-        if v:
-            parts.append(f"{label}：{v}")
-    if not parts:
-        return "未能识别出有效内容，原图已保留。"
-    return "✅ 识别完成\n" + "\n".join(parts)
+    """识别群摘要：固定只显示号码与网址两行。"""
+    phones = _phones_from_result(d)
+    phone_str = "，".join(sorted(phones)) if phones else "无"
+    urls = (d.get("urls") or "").strip()
+    url_str = urls if urls else "无"
+    return f"✅ 识别完成\n号码：{phone_str}\n网址：{url_str}"
 
 
 def _format_query_result(phone, r):
