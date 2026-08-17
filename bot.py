@@ -112,26 +112,30 @@ async def _process_photo(path, user_id, user_name):
     async with _ocr_lock:
         result = await asyncio.to_thread(_ocr_and_parse, path)
 
-        # 无网址的图自动忽略，不入库
-        if not (result.get("urls") or "").strip():
+    print(f"[_process_photo] OCR 原始文本：{result.get('raw_ocr', '')[:200]!r}", flush=True)
+    print(f"[_process_photo] 解析结果：phones={result.get('phone_in_body')!r} urls={result.get('urls')!r}", flush=True)
+
+    # 无网址的图自动忽略，不入库
+    if not (result.get("urls") or "").strip():
+        print("[_process_photo] 未识别到网址，忽略", flush=True)
+        os.remove(path)
+        return None, None
+
+    # 去重：图中任一手机号码已被识别过，只保留最早的图
+    for phone in _phones_from_result(result):
+        if await db.exists_phone(phone):
             os.remove(path)
-            return None, None
+            return None, phone
 
-        # 去重：图中任一手机号码已被识别过，只保留最早的图
-        for phone in _phones_from_result(result):
-            if await db.exists_phone(phone):
-                os.remove(path)
-                return None, phone
-
-        data = dict(result)
-        data.update({
-            "image_path": path,
-            "user_id": user_id,
-            "user_name": user_name,
-            "created_at": _now_iso(),
-        })
-        await db.insert(data)
-        return data, None
+    data = dict(result)
+    data.update({
+        "image_path": path,
+        "user_id": user_id,
+        "user_name": user_name,
+        "created_at": _now_iso(),
+    })
+    await db.insert(data)
+    return data, None
 
 
 @dp.message(F.text, ~F.text.startswith("/"))
