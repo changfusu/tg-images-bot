@@ -54,7 +54,8 @@ def _resize_for_ocr(path, max_side=1280):
         return path
     scale = max_side / max(w, h)
     new_size = (int(w * scale), int(h * scale))
-    img = img.resize(new_size, Image.Resampling.LANCZOS)
+    # ponytail: Pillow 各版本兼容，不用 Image.Resampling
+    img = img.resize(new_size, Image.LANCZOS)
     base, ext = os.path.splitext(path)
     resized_path = f"{base}_resized{ext}"
     img.save(resized_path)

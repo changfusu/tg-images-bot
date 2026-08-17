@@ -67,24 +67,35 @@ def _role_keyboard(chat_id, with_ignore=False):
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-@dp.message(F.photo)
+@dp.message(F.photo | (F.document & F.document.mime_type.startswith("image/")))
 async def on_photo(message: Message):
+    chat_id = message.chat.id
+    chat_type = message.chat.type
+    print(f"[on_photo] 收到图片 chat_id={chat_id} type={chat_type}", flush=True)
+
     # 仅识别群发图才处理；私聊发图给提示
-    if await db.get_group_role(message.chat.id) != "source":
-        if message.chat.type == "private":
+    if await db.get_group_role(chat_id) != "source":
+        print(f"[on_photo] 群 {chat_id} 不是识别群，跳过", flush=True)
+        if chat_type == "private":
             await message.reply("请在「识别群」内发送截图进行识别。")
         return
 
-    photo = message.photo[-1]  # 取最大尺寸
-    f = await message.bot.get_file(photo.file_id)
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    else:
+        file_id = message.document.file_id
+
+    f = await message.bot.get_file(file_id)
     ext = os.path.splitext(f.file_path)[-1] or ".jpg"
     name = f"{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
     path = os.path.join(config.IMAGES_DIR, name)
     await message.bot.download_file(f.file_path, path)
+    print(f"[on_photo] 已下载图片 {path}", flush=True)
 
     user_id = message.from_user.id
     user_name = message.from_user.full_name or message.from_user.username or str(message.from_user.id)
     data, dup_phone = await _process_photo(path, user_id, user_name)
+    print(f"[on_photo] 处理结果 data={data is not None} dup_phone={dup_phone}", flush=True)
     if dup_phone:
         await message.reply(f"手机号 {dup_phone} 已识别过，跳过。")
         return
