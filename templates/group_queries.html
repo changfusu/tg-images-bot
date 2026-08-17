@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>群查询记录</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; }
+  form { margin-bottom: 16px; }
+  input, select, button { padding: 6px 8px; margin-right: 6px; }
+  .muted { color: #888; }
+  a { color: #06c; text-decoration: none; }
+  .pager { margin-top: 12px; }
+  .range-btn { display: inline-block; padding: 6px 10px; margin-right: 4px; border: 1px solid #ccc; border-radius: 4px; }
+  .range-btn.active { background: #06c; color: #fff; border-color: #06c; }
+</style>
+</head>
+<body>
+<h2>群查询记录</h2>
+<p><a href="/">← 返回台账</a></p>
+<form method="get" action="/group-queries">
+  <select name="chat_id">
+    <option value="">选择群</option>
+    {% for g in groups %}
+    <option value="{{ g.chat_id }}" {% if chat_id == g.chat_id|string %}selected{% endif %}>
+      [{{ "识别群" if g.role == "source" else "查询群" }}] {{ g.title or g.chat_id }}（{{ g.chat_id }}）
+    </option>
+    {% endfor %}
+  </select>
+  <input type="hidden" name="range" value="{{ range }}">
+  <button type="submit">查询</button>
+</form>
+<p>
+  范围：
+  <a class="range-btn {% if range == 'all' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=all">全部</a>
+  <a class="range-btn {% if range == 'today' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=today">当日</a>
+  <a class="range-btn {% if range == 'week' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=week">最近一周</a>
+  <a class="range-btn {% if range == 'month' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=month">最近一个月</a>
+</p>
+{% if chat_id %}
+<p class="muted">共 {{ total }} 条记录 {% if time_from %}（{{ time_from }} 至 {{ time_to }}）{% endif %}</p>
+<table>
+  <thead>
+    <tr><th>查询号码</th><th>查询时间</th></tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.phone }}</td>
+      <td>{{ r.queried_at }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="2" class="muted">暂无查询记录</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+<div class="pager">
+  {% if page > 1 %}
+<a href="?chat_id={{ chat_id }}&range={{ range }}&page={{ page-1 }}">上一页</a>{% endif %}
+  第 {{ page }} / {{ pages }} 页
+  {% if page < pages %}<a href="?chat_id={{ chat_id }}&range={{ range }}&page={{ page+1 }}">下一页</a>{% endif %}
+</div>
+{% else %}
+<p class="muted">请选择一个群查看查询记录。</p>
+{% endif %}
+</body>
+</html>
