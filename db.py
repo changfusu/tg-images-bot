@@ -38,7 +38,15 @@ CREATE TABLE IF NOT EXISTS query_logs (
     chat_id    INTEGER NOT NULL,
     phone      TEXT NOT NULL,
     queried_at TEXT NOT NULL,
-    message_id INTEGER
+    message_id INTEGER,
+    package    TEXT NOT NULL DEFAULT '',   -- 包号：数据包名称
+    url        TEXT NOT NULL DEFAULT '',   -- 命中记录的网址
+    found      INTEGER NOT NULL DEFAULT 1  -- 是否命中（=发送成功）；旧数据均为命中
+);
+CREATE TABLE IF NOT EXISTS admins (
+    user_id    INTEGER PRIMARY KEY,
+    added_by   INTEGER,
+    created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_query_logs_chat_time ON query_logs(chat_id, queried_at);
 CREATE INDEX IF NOT EXISTS idx_query_logs_phone ON query_logs(phone);
@@ -56,7 +64,7 @@ async def init():
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.executescript(SCHEMA)
         await db.commit()
-    await _migrate_query_logs_message_id()
+    await _migrate_query_logs()
 
 
 def _where(q="", operator="", time_from="", time_to=""):
@@ -77,14 +85,20 @@ def _where(q="", operator="", time_from="", time_to=""):
     return sql, params
 
 
-async def _migrate_query_logs_message_id():
-    """迁移：为 query_logs 增加 message_id 列（老数据库兼容）。"""
+async def _migrate_query_logs():
+    """迁移：为 query_logs 补齐老库缺失的列（message_id/package/url/found）。"""
     async with aiosqlite.connect(config.DB_PATH) as db:
         cur = await db.execute("PRAGMA table_info(query_logs)")
         columns = {row[1] for row in await cur.fetchall()}
-        if "message_id" in columns:
-            return
-        await db.execute("ALTER TABLE query_logs ADD COLUMN message_id INTEGER")
+        if "message_id" not in columns:
+            await db.execute("ALTER TABLE query_logs ADD COLUMN message_id INTEGER")
+        if "package" not in columns:
+            await db.execute("ALTER TABLE query_logs ADD COLUMN package TEXT NOT NULL DEFAULT ''")
+        if "url" not in columns:
+            await db.execute("ALTER TABLE query_logs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
+        if "found" not in columns:
+            # 旧数据都是命中才记录的，默认 found=1
+            await db.execute("ALTER TABLE query_logs ADD COLUMN found INTEGER NOT NULL DEFAULT 1")
         await db.commit()
 
 
@@ -145,16 +159,46 @@ async def get_group_role(chat_id):
         return row[0] if row else None
 
 
-async def exists_phone(phone) -> bool:
-    """判断手机号是否已作为发件号码或正文号码存在。"""
+async def add_admin(user_id, added_by):
+    """登记管理员（幂等：同 user_id 不重复插入）。"""
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     async with aiosqlite.connect(config.DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT 1 FROM messages WHERE sender_number = ? OR phone_in_body LIKE ? LIMIT 1",
-            (phone, f"%{phone}%"))
+        await db.execute(
+            "INSERT INTO admins (user_id, added_by, created_at) VALUES (?,?,?) "
+            "ON CONFLICT(user_id) DO NOTHING",
+            (user_id, added_by, created_at))
+        await db.commit()
+
+
+async def remove_admin(user_id):
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute("DELETE FROM admins WHERE user_id=?", (user_id,))
+        await db.commit()
+
+
+async def list_admins():
+    """数据库里登记的管理员 user_id 列表（不含 .env 里的超管）。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute("SELECT user_id FROM admins ORDER BY created_at")
+        return [row[0] for row in await cur.fetchall()]
+
+
+async def is_db_admin(user_id) -> bool:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute("SELECT 1 FROM admins WHERE user_id=? LIMIT 1", (user_id,))
         return await cur.fetchone() is not None
 
 
-async def search_by_phone(phone, limit=5):
+async def exists_duplicate(phone, content) -> bool:
+    """同号且同内容才算重复；同号不同内容仍需入库。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT 1 FROM messages WHERE (sender_number = ? OR phone_in_body LIKE ?) AND content = ? LIMIT 1",
+            (phone, f"%{phone}%", content or ""))
+        return await cur.fetchone() is not None
+
+
+async def search_by_phone(phone, limit=50):
     """按手机号查记录：命中发件号码或正文号码，按短信时间倒序。"""
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -165,24 +209,23 @@ async def search_by_phone(phone, limit=5):
         return [dict(r) for r in await cur.fetchall()]
 
 
-async def log_query(chat_id, phone, message_id=None):
-    """记录某查询群查询过的手机号，以及返回结果的第一条消息 ID。"""
+async def log_query(chat_id, phone, message_id=None, package="", url="", found=True):
+    """记录一次查询：手机号、包号（数据包名）、命中网址、是否命中，以及返回结果的第一条消息 ID。"""
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.execute(
-            "INSERT INTO query_logs (chat_id, phone, queried_at, message_id) VALUES (?, ?, ?, ?)",
-            (chat_id, phone, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), message_id))
+            "INSERT INTO query_logs (chat_id, phone, queried_at, message_id, package, url, found) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chat_id, phone, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             message_id, package, url, 1 if found else 0))
         await db.commit()
 
 
-async def get_query_log(phone):
-    """取该手机号最近一次被查询的记录（任意查询群）。"""
+async def was_queried(phone) -> bool:
+    """全局去重：任一查询群命中（found=1）过的号码即视为已查询，其他群不可再查。"""
     async with aiosqlite.connect(config.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT * FROM query_logs WHERE phone = ? ORDER BY queried_at DESC LIMIT 1",
-            (phone,))
-        row = await cur.fetchone()
-        return dict(row) if row else None
+            "SELECT 1 FROM query_logs WHERE phone = ? AND found = 1 LIMIT 1", (phone,))
+        return await cur.fetchone() is not None
 
 
 async def query_group_queries(chat_id, time_from="", time_to="", limit=200, offset=0):
@@ -217,3 +260,19 @@ async def count_group_queries(chat_id, time_from="", time_to=""):
         cur = await db.execute(sql, params)
         row = await cur.fetchone()
         return row[0]
+
+
+async def group_query_stats(chat_id, time_from="", time_to=""):
+    """统计某群查询：总数、已发送（命中）、未发送（未命中）。"""
+    sql = "SELECT COUNT(*) AS total, COALESCE(SUM(found), 0) AS received FROM query_logs WHERE chat_id = ?"
+    params = [chat_id]
+    if time_from:
+        sql += " AND queried_at >= ?"
+        params.append(time_from)
+    if time_to:
+        sql += " AND queried_at <= ?"
+        params.append(time_to)
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute(sql, params)
+        total, received = await cur.fetchone()
+        return {"total": total, "received": received, "not_received": total - received}

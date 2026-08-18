@@ -6,6 +6,7 @@
 """
 import asyncio
 import os
+import re
 import time
 import uuid
 from datetime import datetime
@@ -50,6 +51,16 @@ dp.update.middleware(LogMiddleware())
 
 def _now_iso():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def _is_admin(user_id) -> bool:
+    """管理员 = .env 里的超管(ADMIN_USER_IDS) + 数据库里登记的管理员。"""
+    return config.is_admin(user_id) or await db.is_db_admin(user_id)
+
+
+async def _all_admin_ids():
+    """全部管理员 user_id（.env 超管 + 数据库管理员），用于通知。"""
+    return set(config.ADMIN_USER_IDS) | set(await db.list_admins())
 
 
 def _role_label(role):
@@ -115,9 +126,10 @@ async def _process_photo(path, user_id, user_name):
     print(f"[_process_photo] OCR 原始文本：{result.get('raw_ocr', '')[:200]!r}", flush=True)
     print(f"[_process_photo] 解析结果：phones={result.get('phone_in_body')!r} urls={result.get('urls')!r}", flush=True)
 
-    # 去重：图中任一手机号码已被识别过，只保留最早的图
+    # 去重：同号且同内容才跳过；同号不同内容仍入库（上传几次就能查几次）
+    content = result.get("content") or ""
     for phone in _phones_from_result(result):
-        if await db.exists_phone(phone):
+        if await db.exists_duplicate(phone, content):
             os.remove(path)
             return None, phone
 
@@ -135,20 +147,23 @@ async def _process_photo(path, user_id, user_name):
 @dp.message(F.text, ~F.text.startswith("/"))
 async def on_text(message: Message):
 
-    # 查询群：手机号 → 查图；支持一行一个号码批量查询；全局去重，命中过的号码静默跳过
+    # 查询群：发号→查图、包号→数据包名；支持批量；全局去重，任何群命中过的号码不可再查
     if await db.get_group_role(message.chat.id) == "query":
-        phones = _unique_phones(message.text)
-        if not phones:
+        pairs = _parse_queries(message.text)
+        if not pairs:
             return
         chat_id = message.chat.id
-        for phone in phones:
-            # 任意查询群已命中过 → 直接跳过，不提示、不记录
-            if await db.get_query_log(phone):
+        for phone, package in pairs:
+            # 一个号码全局只允许查询一次：A群查过，B群就查不到
+            if await db.was_queried(phone):
+                await message.reply(f"手机号 {phone} 已被查询过。")
                 continue
-            first_msg_id, found = await _send_query_results(message, phone)
-            # 只有命中记录才写入查询日志；未命中的允许后续补上记录后再查
-            if found:
-                await db.log_query(chat_id, phone, first_msg_id)
+            # 统计 = 本群累计查询次数 + 1（本次）：每查一次就 +1，命中与否、是否重复都计数
+            stats = await db.group_query_stats(chat_id)
+            seq = stats["total"] + 1
+            first_msg_id, found, url = await _send_query_results(message, phone, seq)
+            # 命中与否都记录（未命中便于网页展示"未发送"）；未命中的后续补记录后仍可重查
+            await db.log_query(chat_id, phone, first_msg_id, package=package, url=url, found=found)
         return
 
     # 私聊：兜底提示，保证私聊必有回应
@@ -172,7 +187,7 @@ async def on_my_chat_member(event: ChatMemberUpdated):
         f"本群 ID：{chat.id}\n请将本 ID 发送给管理员，登记本群为「识别群」或「查询群」。")
 
     # 管理员需先私聊 /start 过本机器人，否则私聊发送会失败（此处静默忽略）
-    for admin_id in config.ADMIN_USER_IDS:
+    for admin_id in await _all_admin_ids():
         try:
             await event.bot.send_message(
                 admin_id,
@@ -187,12 +202,15 @@ async def cmd_start(message: Message):
     print(f"[handler] cmd_start 被调用, chat_type={message.chat.type}, from={message.from_user.id}", flush=True)
     if message.chat.type != "private":
         return
-    if config.is_admin(message.from_user.id):
+    if await _is_admin(message.from_user.id):
         text = ("你好，我是短信识别台账机器人。\n\n"
                 "把机器人拉进群后：群里会播报群 ID，我会私聊发你按钮登记「识别群 / 查询群」。\n\n"
                 "管理命令：\n"
                 "· /groups — 查看/删除已登记群\n"
-                "· /addgroup <群ID> — 手动登记群\n\n"
+                "· /addgroup <群ID> — 手动登记群\n"
+                "· /admins — 查看管理员\n"
+                "· /addadmin <用户ID> — 添加管理员\n"
+                "· /deladmin <用户ID> — 移除管理员\n\n"
                 "群内用法：识别群发短信截图，查询群发手机号查图。")
     else:
         text = "你好，我是短信识别台账机器人。请在已登记的群内使用：识别群发截图、查询群发手机号。"
@@ -201,7 +219,7 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("groups"))
 async def cmd_groups(message: Message):
-    if not config.is_admin(message.from_user.id):
+    if not await _is_admin(message.from_user.id):
         await message.reply("无权限。")
         return
     groups = await db.list_groups()
@@ -215,7 +233,7 @@ async def cmd_groups(message: Message):
 
 @dp.message(Command("addgroup"))
 async def cmd_addgroup(message: Message, command: CommandObject):
-    if not config.is_admin(message.from_user.id):
+    if not await _is_admin(message.from_user.id):
         await message.reply("无权限。")
         return
     arg = (command.args or "").strip()
@@ -230,9 +248,64 @@ async def cmd_addgroup(message: Message, command: CommandObject):
     await message.reply(f"请选择群 {chat_id} 的角色：", reply_markup=_role_keyboard(chat_id))
 
 
+def _parse_user_id(arg):
+    """把命令参数解析为 Telegram 用户 ID（纯数字），失败返回 None。"""
+    try:
+        return int((arg or "").strip())
+    except ValueError:
+        return None
+
+
+@dp.message(Command("admins"))
+async def cmd_admins(message: Message):
+    if not await _is_admin(message.from_user.id):
+        await message.reply("无权限。")
+        return
+    super_admins = sorted(config.ADMIN_USER_IDS)
+    db_admins = await db.list_admins()
+    lines = ["当前管理员："]
+    lines += [f"· {uid}（超管，来自配置）" for uid in super_admins]
+    lines += [f"· {uid}" for uid in db_admins]
+    if not super_admins and not db_admins:
+        lines.append("（暂无，请在 .env 配置 ADMIN_USER_IDS 作为首位超管）")
+    await message.reply("\n".join(lines))
+
+
+@dp.message(Command("addadmin"))
+async def cmd_addadmin(message: Message, command: CommandObject):
+    if not await _is_admin(message.from_user.id):
+        await message.reply("无权限。")
+        return
+    uid = _parse_user_id(command.args)
+    if uid is None:
+        await message.reply("用法：/addadmin <用户ID>（纯数字）")
+        return
+    if config.is_admin(uid):
+        await message.reply(f"{uid} 已是配置里的超管，无需重复添加。")
+        return
+    await db.add_admin(uid, message.from_user.id)
+    await message.reply(f"✅ 已添加管理员 {uid}。")
+
+
+@dp.message(Command("deladmin"))
+async def cmd_deladmin(message: Message, command: CommandObject):
+    if not await _is_admin(message.from_user.id):
+        await message.reply("无权限。")
+        return
+    uid = _parse_user_id(command.args)
+    if uid is None:
+        await message.reply("用法：/deladmin <用户ID>（纯数字）")
+        return
+    if config.is_admin(uid):
+        await message.reply(f"{uid} 是配置里的超管，请到 .env 的 ADMIN_USER_IDS 中移除。")
+        return
+    await db.remove_admin(uid)
+    await message.reply(f"已移除管理员 {uid}（若此前不是管理员则无影响）。")
+
+
 @dp.callback_query()
 async def on_callback(cb: CallbackQuery):
-    if not config.is_admin(cb.from_user.id):
+    if not await _is_admin(cb.from_user.id):
         await cb.answer("无权限。", show_alert=True)
         return
     parts = (cb.data or "").split(":")
@@ -285,16 +358,40 @@ def _unique_phones(text):
     return phones
 
 
-async def _send_query_results(message: Message, phone: str):
-    """在查询群发送手机号查询结果，返回 (第一条消息 message_id, 是否命中)。"""
+# 查询群格式：发号：15775412943 包号：5654-44—44（冒号中英文皆可，"号"字可省）
+FA_HAO_RE = re.compile(r"发号?\s*[:：]\s*(1[3-9]\d{9})")
+BAO_HAO_RE = re.compile(r"包号?\s*[:：]\s*(\S+)")
+
+
+def _parse_queries(text):
+    """解析查询消息，返回 [(phone, package), ...]，按出现顺序去重手机号。
+
+    优先按「发号：…」取号；没有发号标记时兼容旧的纯手机号批量查询。
+    包号按顺序与发号配对，缺省用最后一个包号（同一批常为同包）。
+    """
+    phones = FA_HAO_RE.findall(text) or _unique_phones(text)
+    pkgs = BAO_HAO_RE.findall(text)
+    seen, pairs = set(), []
+    for i, p in enumerate(phones):
+        if p in seen:
+            continue
+        seen.add(p)
+        pkg = pkgs[i] if i < len(pkgs) else (pkgs[-1] if pkgs else "")
+        pairs.append((p, pkg))
+    return pairs
+
+
+async def _send_query_results(message: Message, phone: str, seq: int = 1):
+    """在查询群发送手机号查询结果，返回 (第一条消息 message_id, 是否命中, 命中记录的网址)。seq=本群第几次成功查询。"""
     records = await db.search_by_phone(phone)
     if not records:
         sent = await message.reply(f"未找到手机号 {phone} 的相关记录。")
-        return (sent.message_id if sent else None), False
+        return (sent.message_id if sent else None), False, ""
 
+    url = (records[0].get("urls") or "").strip()
     first_msg_id = None
     for r in records:
-        caption = _format_query_result(phone, r)
+        caption = _format_query_result(phone, r, seq)
         path = r.get("image_path")
         if path and os.path.exists(path):
             sent = await message.answer_photo(FSInputFile(path), caption=caption)
@@ -302,7 +399,7 @@ async def _send_query_results(message: Message, phone: str):
             sent = await message.reply(caption)
         if first_msg_id is None and sent:
             first_msg_id = sent.message_id
-    return first_msg_id, True
+    return first_msg_id, True, url
 
 
 def _format_summary(d):
@@ -314,12 +411,13 @@ def _format_summary(d):
     return f"✅ 识别完成\n号码：{phone_str}\n网址：{url_str}"
 
 
-def _format_query_result(phone, r):
-    """查询命中结果 caption：纯手机号 + 网址（如有）。"""
+def _format_query_result(phone, r, seq=1):
+    """查询命中结果 caption：纯手机号 + 网址（如有）+ 本群累计查询成功次数。"""
     parts = [phone]
     urls = (r.get("urls") or "").strip()
     if urls:
         parts.append(urls)
+    parts.append(f"统计：{seq}")
     return "\n".join(parts)
 
 
@@ -331,6 +429,9 @@ async def run_bot(bot_token: str):
         BotCommand(command="start", description="查看用法"),
         BotCommand(command="groups", description="查看/删除已登记群"),
         BotCommand(command="addgroup", description="手动登记群（/addgroup <群ID>）"),
+        BotCommand(command="admins", description="查看管理员"),
+        BotCommand(command="addadmin", description="添加管理员（/addadmin <用户ID>）"),
+        BotCommand(command="deladmin", description="移除管理员（/deladmin <用户ID>）"),
     ])
     print("[bot] 命令已注册，开始 polling", flush=True)
     await dp.start_polling(bot)
