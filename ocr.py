@@ -1,7 +1,7 @@
-"""OCR 封装：PaddleOCR 识别图片为文本行列表。
+"""OCR 封装：RapidOCR（onnxruntime）识别图片为文本行列表。
 
-懒加载单例（模型大，只加载一次），返回按阅读顺序排序的 [{text, score, x, y}]。
-兼容 PaddleOCR 2.x（ocr.ocr）与 3.x（predict）两种返回结构。
+懒加载单例（模型随包内置，无需联网下载），返回按阅读顺序排序的 [{text, score, x, y}]。
+从 PaddleOCR 迁移：服务器 CPU 无 AVX-512，Paddle 的 MKLDNN 内核会 SIGILL。
 """
 import os
 
@@ -9,19 +9,11 @@ _ocr = None
 
 
 def get_ocr():
-    """懒加载 PaddleOCR 单例。首次调用可能联网下载模型，较慢。"""
+    """懒加载 RapidOCR 单例。"""
     global _ocr
     if _ocr is None:
-        from paddleocr import PaddleOCR
-        try:
-            _ocr = PaddleOCR(
-                lang="ch",
-                use_textline_orientation=True,
-                use_angle_cls=True,
-                show_log=False,
-            )  # 3.x
-        except Exception:
-            _ocr = PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)  # 2.x
+        from rapidocr_onnxruntime import RapidOCR
+        _ocr = RapidOCR()  # 默认即中文 ch_PP-OCR 模型
     return _ocr
 
 
@@ -30,11 +22,16 @@ def ocr_image(path: str):
     ocr = get_ocr()
     processed_path = _resize_for_ocr(path)
     try:
-        result = ocr.predict(processed_path)  # 3.x
-        lines = _from_v3(result)
-    except (AttributeError, TypeError):
-        result = ocr.ocr(processed_path, cls=True)  # 2.x
-        lines = _from_v2(result)
+        result, _ = ocr(processed_path)
+        lines = [
+            {
+                "text": text,
+                "score": float(score),
+                "x": min(p[0] for p in box),
+                "y": min(p[1] for p in box),
+            }
+            for box, text, score in result or []
+        ]
     finally:
         if processed_path != path:
             os.remove(processed_path)
@@ -60,26 +57,6 @@ def _resize_for_ocr(path, max_side=1280):
     resized_path = f"{base}_resized{ext}"
     img.save(resized_path)
     return resized_path
-
-
-def _from_v3(result):
-    lines = []
-    for r in result or []:
-        texts = getattr(r, "rec_texts", None) or []
-        scores = getattr(r, "rec_scores", None) or []
-        polys = getattr(r, "rec_polys", None) or getattr(r, "rec_boxes", None) or []
-        for text, score, box in zip(texts, scores, polys):
-            lines.append({"text": text, "score": float(score), "x": min(p[0] for p in box), "y": min(p[1] for p in box)})
-    return lines
-
-
-def _from_v2(result):
-    lines = []
-    for page in result or []:
-        for item in page or []:
-            box, (text, score) = item
-            lines.append({"text": text, "score": float(score), "x": min(p[0] for p in box), "y": min(p[1] for p in box)})
-    return lines
 
 
 def _sort_lines(lines):

@@ -23,8 +23,8 @@ import parser
 
 dp = Dispatcher()
 
-# ponytail: PaddleOCR 的 predictor 非线程安全，批量传图时会并发触发 SIGSEGV；
-# 用 asyncio 锁把 OCR 串行化（模型本身也是单 GPU/CPU 在跑，并发不会更快）。
+# ponytail: OCR 引擎的推理会话非线程安全，批量传图时并发调用可能崩溃；
+# 用 asyncio 锁把 OCR 串行化（模型本身也是单 CPU 在跑，并发不会更快）。
 _ocr_lock = asyncio.Lock()
 
 
@@ -119,7 +119,7 @@ async def on_photo(message: Message):
 async def _process_photo(path, user_id, user_name):
     """OCR + 解析 + 手机号去重入库。返回 (data, duplicate_phone)。"""
     # OCR + 解析是阻塞操作，丢线程池避免卡事件循环；
-    # 加锁防止批量传图时多个线程同时使用 PaddleOCR predictor 导致段错误。
+    # 加锁防止批量传图时多个线程同时使用 OCR 推理会话导致崩溃。
     async with _ocr_lock:
         result = await asyncio.to_thread(_ocr_and_parse, path)
 
