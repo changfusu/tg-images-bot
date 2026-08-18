@@ -7,9 +7,8 @@ services:
       - .env
     volumes:
       - ./data:/app/data                 # SQLite + 原图持久化
-      - ./paddleocr_models:/root/.paddleocr  # 模型缓存，避免重复下载
     restart: unless-stopped
-    shm_size: "2g"                       # Paddle 推理所需共享内存
+    shm_size: "2g"                       # OCR 推理共享内存余量
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 30s

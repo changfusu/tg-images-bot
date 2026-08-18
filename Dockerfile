@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# PaddleOCR/OpenCV 运行所需的系统库
+# OpenCV/onnxruntime 运行所需的系统库
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 libgomp1 libsm6 libxext6 libxrender1 \
     && rm -rf /var/lib/apt/lists/*
