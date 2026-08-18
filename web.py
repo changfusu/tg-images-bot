@@ -2,6 +2,7 @@
 import csv
 import io
 import os
+import re
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request
@@ -20,6 +21,15 @@ COLS = (("msg_time", "短信时间"), ("sender_number", "发件号码"), ("opera
         ("phone_in_body", "正文号码"), ("content", "信息内容"), ("urls", "网址"),
         ("user_name", "上传人"), ("created_at", "上传时间"))
 PER_PAGE = 50
+
+# 导出只保留运营商、正文号码、网址
+EXPORT_COLS = (("operator", "运营商"), ("phone_in_body", "正文号码"), ("urls", "网址"))
+
+
+def _export_row(r):
+    """取导出列；网址剔除中文。"""
+    urls = re.sub(r"[一-鿿]", "", r.get("urls", "") or "")
+    return [r.get("operator", ""), r.get("phone_in_body", ""), urls]
 
 
 def _to_full(to):
@@ -80,6 +90,8 @@ async def group_queries(request: Request, chat_id: str = "", range: str = "all",
     rows = []
     total = 0
     pages = 1
+    stats = {"total": 0, "received": 0, "not_received": 0}
+    group_title = ""
     time_from, time_to = _range_to_dates(range)
     if chat_id:
         try:
@@ -90,19 +102,22 @@ async def group_queries(request: Request, chat_id: str = "", range: str = "all",
             rows = await db.query_group_queries(selected_chat_id, time_from=time_from, time_to=time_to,
                                                 limit=PER_PAGE, offset=(page - 1) * PER_PAGE)
             total = await db.count_group_queries(selected_chat_id, time_from=time_from, time_to=time_to)
+            stats = await db.group_query_stats(selected_chat_id, time_from=time_from, time_to=time_to)
             pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+            group_title = next((g["title"] for g in groups if g["chat_id"] == selected_chat_id), "")
     return templates.TemplateResponse(request, "group_queries.html", {
         "groups": groups, "rows": rows, "total": total, "page": page, "pages": pages,
         "chat_id": chat_id, "range": range, "time_from": time_from, "time_to": time_to,
+        "stats": stats, "group_title": group_title,
     })
 
 
 def _export_csv(rows):
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow([c[1] for c in COLS])
+    w.writerow([c[1] for c in EXPORT_COLS])
     for r in rows:
-        w.writerow([r.get(c[0], "") for c in COLS])
+        w.writerow(_export_row(r))
     data = buf.getvalue().encode("utf-8-sig")  # BOM 便于 Excel 打开中文
     return StreamingResponse(io.BytesIO(data), media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=records.csv"})
@@ -112,9 +127,9 @@ def _export_xlsx(rows):
     from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
-    ws.append([c[1] for c in COLS])
+    ws.append([c[1] for c in EXPORT_COLS])
     for r in rows:
-        ws.append([r.get(c[0], "") for c in COLS])
+        ws.append(_export_row(r))
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)

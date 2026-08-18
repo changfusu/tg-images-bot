@@ -3,68 +3,134 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>群查询记录</title>
+<title>网址数据</title>
 <style>
-  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 24px; color: #222; }
-  table { border-collapse: collapse; width: 100%; font-size: 14px; }
-  th, td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; vertical-align: top; }
-  th { background: #f5f5f5; }
-  form { margin-bottom: 16px; }
-  input, select, button { padding: 6px 8px; margin-right: 6px; }
-  .muted { color: #888; }
-  a { color: #06c; text-decoration: none; }
-  .pager { margin-top: 12px; }
-  .range-btn { display: inline-block; padding: 6px 10px; margin-right: 4px; border: 1px solid #ccc; border-radius: 4px; }
-  .range-btn.active { background: #06c; color: #fff; border-color: #06c; }
+  :root {
+    --navy: #1f5f8a;        /* 表头深蓝 */
+    --navy-dark: #174b6d;
+    --line: #e3eaef;
+    --ink: #22303a;
+    --muted: #8a97a1;
+    --green: #1a9e54;
+    --green-bg: #e6f6ec;
+    --red: #d93025;
+    --red-bg: #fdecea;
+    --blue: #2f6f9f;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; margin: 0;
+         background: #f3f6f8; color: var(--ink); }
+  .wrap { max-width: 1080px; margin: 24px auto; background: #fff; border: 1px solid var(--line);
+          border-radius: 10px; padding: 20px 24px 28px; box-shadow: 0 1px 3px rgba(20,40,60,.05); }
+  a { color: var(--blue); text-decoration: none; }
+  form { margin: 12px 0; }
+  input, select, button { padding: 7px 10px; margin-right: 6px; border: 1px solid #cfd8de;
+                          border-radius: 6px; font-size: 14px; background: #fff; }
+  button { background: var(--navy); color: #fff; border-color: var(--navy); cursor: pointer; }
+  .range-btn { display: inline-block; padding: 6px 12px; margin-right: 6px; border: 1px solid #cfd8de;
+               border-radius: 6px; color: var(--ink); background: #fff; font-size: 13px; }
+  .range-btn.active { background: var(--navy); color: #fff; border-color: var(--navy); }
+  .muted { color: var(--muted); }
+
+  .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px;
+          flex-wrap: wrap; margin-bottom: 16px; }
+  .head h1 { font-size: 24px; margin: 0 0 4px; }
+  .head .sub { color: var(--muted); font-size: 13px; }
+
+  .stats { display: flex; gap: 12px; }
+  .stat { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px 18px;
+          min-width: 108px; box-shadow: 0 1px 2px rgba(20,40,60,.04); position: relative; }
+  .stat::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 4px;
+                  border-radius: 4px; background: var(--blue); }
+  .stat.ok::before { background: var(--green); }
+  .stat.bad::before { background: var(--red); }
+  .stat .label { font-size: 13px; color: var(--ink); margin-bottom: 6px; padding-left: 6px; }
+  .stat .num { font-size: 24px; font-weight: 700; padding-left: 6px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin-top: 8px; }
+  thead th { background: var(--navy); color: #fff; font-weight: 600; text-align: center;
+             padding: 12px 14px; border: 1px solid var(--navy-dark); }
+  tbody td { border: 1px solid var(--line); padding: 12px 14px; text-align: center; }
+  tbody tr:nth-child(even) { background: #f8fafb; }
+  td.pkg { text-align: left; color: #33505f; }
+
+  .badge { display: inline-block; padding: 4px 12px; border-radius: 5px; font-size: 13px; font-weight: 600; }
+  .badge.ok { background: var(--green-bg); color: var(--green); }
+  .badge.bad { background: var(--red-bg); color: var(--red); }
+
+  .pager { margin-top: 16px; text-align: center; }
+  .pager a { padding: 6px 12px; border: 1px solid #cfd8de; border-radius: 6px; margin: 0 4px; }
 </style>
 </head>
 <body>
-<h2>群查询记录</h2>
-<p><a href="/">← 返回台账</a></p>
-<form method="get" action="/group-queries">
-  <select name="chat_id">
-    <option value="">选择群</option>
-    {% for g in groups %}
-    <option value="{{ g.chat_id }}" {% if chat_id == g.chat_id|string %}selected{% endif %}>
-      [{{ "识别群" if g.role == "source" else "查询群" }}] {{ g.title or g.chat_id }}（{{ g.chat_id }}）
-    </option>
+<div class="wrap">
+  <p><a href="/">← 返回台账</a></p>
+
+  <form method="get" action="/group-queries">
+    <select name="chat_id">
+      <option value="">选择群</option>
+      {% for g in groups %}
+      <option value="{{ g.chat_id }}" {% if chat_id == g.chat_id|string %}selected{% endif %}>
+        [{{ "识别群" if g.role == "source" else "查询群" }}] {{ g.title or g.chat_id }}（{{ g.chat_id }}）
+      </option>
+      {% endfor %}
+    </select>
+    <input type="hidden" name="range" value="{{ range }}">
+    <button type="submit">查询</button>
+  </form>
+  <p>
+    范围：
+    <a class="range-btn {% if range == 'all' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=all">全部</a>
+    <a class="range-btn {% if range == 'today' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=today">当日</a>
+    <a class="range-btn {% if range == 'week' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=week">最近一周</a>
+    <a class="range-btn {% if range == 'month' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=month">最近一个月</a>
+  </p>
+
+  {% if chat_id %}
+  <div class="head">
+    <div>
+      <h1>网址数据{% if group_title %} · {{ group_title }}{% endif %}</h1>
+      <div class="sub">导出数据 {{ total }} 条{% if time_from %}（{{ time_from }} 至 {{ time_to }}）{% endif %}</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="label">总数</div><div class="num">{{ stats.total }}</div></div>
+      <div class="stat ok"><div class="label">已发送</div><div class="num">{{ stats.received }}</div></div>
+      <div class="stat bad"><div class="label">未发送</div><div class="num">{{ stats.not_received }}</div></div>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>数据包名称</th><th>网址</th><th>对方手机号</th><th>是否已发送成功</th></tr>
+    </thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="pkg">{{ r.package or "—" }}</td>
+        <td>{{ r.url or "—" }}</td>
+        <td>{{ r.phone }}</td>
+        <td>
+          {% if r.found %}
+          <span class="badge ok">已发送成功</span>
+          {% else %}
+          <span class="badge bad">未发送成功</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted">暂无查询记录</td></tr>
     {% endfor %}
-  </select>
-  <input type="hidden" name="range" value="{{ range }}">
-  <button type="submit">查询</button>
-</form>
-<p>
-  范围：
-  <a class="range-btn {% if range == 'all' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=all">全部</a>
-  <a class="range-btn {% if range == 'today' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=today">当日</a>
-  <a class="range-btn {% if range == 'week' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=week">最近一周</a>
-  <a class="range-btn {% if range == 'month' %}active{% endif %}" href="?chat_id={{ chat_id }}&range=month">最近一个月</a>
-</p>
-{% if chat_id %}
-<p class="muted">共 {{ total }} 条记录 {% if time_from %}（{{ time_from }} 至 {{ time_to }}）{% endif %}</p>
-<table>
-  <thead>
-    <tr><th>查询号码</th><th>查询时间</th></tr>
-  </thead>
-  <tbody>
-  {% for r in rows %}
-    <tr>
-      <td>{{ r.phone }}</td>
-      <td>{{ r.queried_at }}</td>
-    </tr>
+    </tbody>
+  </table>
+
+  <div class="pager">
+    {% if page > 1 %}<a href="?chat_id={{ chat_id }}&range={{ range }}&page={{ page-1 }}">上一页</a>{% endif %}
+    第 {{ page }} / {{ pages }} 页
+    {% if page < pages %}<a href="?chat_id={{ chat_id }}&range={{ range }}&page={{ page+1 }}">下一页</a>{% endif %}
+  </div>
   {% else %}
-    <tr><td colspan="2" class="muted">暂无查询记录</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-<div class="pager">
-  {% if page > 1 %}
-<a href="?chat_id={{ chat_id }}&range={{ range }}&page={{ page-1 }}">上一页</a>{% endif %}
-  第 {{ page }} / {{ pages }} 页
-  {% if page < pages %}<a href="?chat_id={{ chat_id }}&range={{ range }}&page={{ page+1 }}">下一页</a>{% endif %}
+  <p class="muted">请选择一个群查看查询记录。</p>
+  {% endif %}
 </div>
-{% else %}
-<p class="muted">请选择一个群查看查询记录。</p>
-{% endif %}
 </body>
 </html>
