@@ -9,7 +9,6 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -50,7 +49,8 @@ dp.update.middleware(LogMiddleware())
 
 
 def _now_iso():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """当前上海时间（服务器可能部署在其他时区，统一按上海算）。"""
+    return config.now_str()
 
 
 async def _is_admin(user_id) -> bool:
@@ -105,19 +105,16 @@ async def on_photo(message: Message):
 
     user_id = message.from_user.id
     user_name = message.from_user.full_name or message.from_user.username or str(message.from_user.id)
-    data, dup_phone = await _process_photo(path, user_id, user_name)
-    print(f"[on_photo] 处理结果 data={data is not None} dup_phone={dup_phone}", flush=True)
-    if dup_phone:
-        await message.reply(f"手机号 {dup_phone} 已识别过，跳过。")
-        return
+    data = await _process_photo(path, user_id, user_name)
     if data is None:
-        return  # 无网址，静默忽略
+        await message.reply("未识别到手机号码，未保存。")
+        return
 
     await message.reply(_format_summary(data))
 
 
 async def _process_photo(path, user_id, user_name):
-    """OCR + 解析 + 手机号去重入库。返回 (data, duplicate_phone)。"""
+    """OCR + 解析 + 入库。有手机号才保存；无手机号删图并返回 None。"""
     # OCR + 解析是阻塞操作，丢线程池避免卡事件循环；
     # 加锁防止批量传图时多个线程同时使用 OCR 推理会话导致崩溃。
     async with _ocr_lock:
@@ -126,12 +123,10 @@ async def _process_photo(path, user_id, user_name):
     print(f"[_process_photo] OCR 原始文本：{result.get('raw_ocr', '')[:200]!r}", flush=True)
     print(f"[_process_photo] 解析结果：phones={result.get('phone_in_body')!r} urls={result.get('urls')!r}", flush=True)
 
-    # 去重：同号且同内容才跳过；同号不同内容仍入库（上传几次就能查几次）
-    content = result.get("content") or ""
-    for phone in _phones_from_result(result):
-        if await db.exists_duplicate(phone, content):
-            os.remove(path)
-            return None, phone
+    # 只认手机号：识别不到手机号的一律不保存
+    if not _phones_from_result(result):
+        os.remove(path)
+        return None
 
     data = dict(result)
     data.update({
@@ -141,7 +136,7 @@ async def _process_photo(path, user_id, user_name):
         "created_at": _now_iso(),
     })
     await db.insert(data)
-    return data, None
+    return data
 
 
 @dp.message(F.text, ~F.text.startswith("/"))
@@ -158,8 +153,9 @@ async def on_text(message: Message):
             if await db.was_queried(phone):
                 await message.reply(f"手机号 {phone} 已被查询过。")
                 continue
-            # 统计 = 本群累计查询次数 + 1（本次）：每查一次就 +1，命中与否、是否重复都计数
-            stats = await db.group_query_stats(chat_id)
+            # 统计 = 本群「当天」查询次数 + 1（本次）：每天 0 点（上海）重置，命中与否、是否重复都计数
+            today_start = f"{config.today_str()} 00:00:00"
+            stats = await db.group_query_stats(chat_id, time_from=today_start)
             seq = stats["total"] + 1
             first_msg_id, found, url = await _send_query_results(message, phone, seq)
             # 命中与否都记录（未命中便于网页展示"未发送"）；未命中的后续补记录后仍可重查
@@ -210,7 +206,8 @@ async def cmd_start(message: Message):
                 "· /addgroup <群ID> — 手动登记群\n"
                 "· /admins — 查看管理员\n"
                 "· /addadmin <用户ID> — 添加管理员\n"
-                "· /deladmin <用户ID> — 移除管理员\n\n"
+                "· /deladmin <用户ID> — 移除管理员\n"
+                "· /delrecord <记录ID> — 删除台账记录\n\n"
                 "群内用法：识别群发短信截图，查询群发手机号查图。")
     else:
         text = "你好，我是短信识别台账机器人。请在已登记的群内使用：识别群发截图、查询群发手机号。"
@@ -301,6 +298,44 @@ async def cmd_deladmin(message: Message, command: CommandObject):
         return
     await db.remove_admin(uid)
     await message.reply(f"已移除管理员 {uid}（若此前不是管理员则无影响）。")
+
+
+@dp.message(Command("delrecord"))
+async def cmd_delrecord(message: Message, command: CommandObject):
+    """按记录 ID 删除台账记录（可同时删本地图片），ID 在网页台账页首列查看。"""
+    if not await _is_admin(message.from_user.id):
+        await message.reply("无权限。")
+        return
+    ids = []
+    for tok in (command.args or "").split():
+        try:
+            ids.append(int(tok))
+        except ValueError:
+            pass
+    if not ids:
+        await message.reply("用法：/delrecord <记录ID> [更多ID...]\n记录 ID 见网页台账页首列。")
+        return
+    deleted, missing = [], []
+    for rid in ids:
+        rec = await db.get_record(rid)
+        if not rec:
+            missing.append(rid)
+            continue
+        await db.delete_record(rid)
+        # 同步删掉本地图片，避免孤儿文件
+        path = rec.get("image_path")
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        deleted.append(rid)
+    parts = []
+    if deleted:
+        parts.append(f"✅ 已删除记录：{', '.join(map(str, deleted))}")
+    if missing:
+        parts.append(f"未找到记录：{', '.join(map(str, missing))}")
+    await message.reply("\n".join(parts))
 
 
 @dp.callback_query()
@@ -432,6 +467,7 @@ async def run_bot(bot_token: str):
         BotCommand(command="admins", description="查看管理员"),
         BotCommand(command="addadmin", description="添加管理员（/addadmin <用户ID>）"),
         BotCommand(command="deladmin", description="移除管理员（/deladmin <用户ID>）"),
+        BotCommand(command="delrecord", description="删除台账记录（/delrecord <记录ID>）"),
     ])
     print("[bot] 命令已注册，开始 polling", flush=True)
     await dp.start_polling(bot)

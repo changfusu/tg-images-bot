@@ -1,5 +1,6 @@
 """全局配置：从 .env 读取环境变量。"""
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,3 +33,18 @@ def is_allowed(user_id: int) -> bool:
 def is_admin(user_id: int) -> bool:
     """仅 ADMIN_USER_IDS 内的用户是管理员。"""
     return user_id in ADMIN_USER_IDS
+
+
+# 上海时区（UTC+8，中国无夏令时，用固定偏移避免依赖系统 tzdata）。
+# 服务器可能部署在其他时区，入库时间戳与「当天」判断统一按上海时间算。
+SH_TZ = timezone(timedelta(hours=8))
+
+
+def now_str() -> str:
+    """当前上海时间，入库时间戳统一用它（与 created_at/msg_time 格式一致）。"""
+    return datetime.now(SH_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def today_str() -> str:
+    """当前上海日期（凌晨 0 点为界），查询群只查当天。"""
+    return datetime.now(SH_TZ).strftime("%Y-%m-%d")

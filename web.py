@@ -41,7 +41,7 @@ def _to_full(to):
 
 def _range_to_dates(range_value):
     """把快捷范围转成 (time_from, time_to)。today/week/month/all。"""
-    now = datetime.now()
+    now = datetime.now(config.SH_TZ)  # 与 queried_at 同为上海时间，保证「今天」范围一致
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if range_value == "today":
         return today.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m-%d %H:%M:%S")

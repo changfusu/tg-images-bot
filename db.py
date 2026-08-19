@@ -189,24 +189,38 @@ async def is_db_admin(user_id) -> bool:
         return await cur.fetchone() is not None
 
 
-async def exists_duplicate(phone, content) -> bool:
-    """同号且同内容才算重复；同号不同内容仍需入库。"""
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT 1 FROM messages WHERE (sender_number = ? OR phone_in_body LIKE ?) AND content = ? LIMIT 1",
-            (phone, f"%{phone}%", content or ""))
-        return await cur.fetchone() is not None
-
-
 async def search_by_phone(phone, limit=50):
-    """按手机号查记录：命中发件号码或正文号码，按短信时间倒序。"""
+    """按手机号查记录：命中发件号码或正文号码，按短信时间倒序。
+
+    只查「当天」（上海时区，凌晨 0 点为界）：msg_time 为空时回退 created_at，
+    取两者的日期部分与今天比较。
+    """
+    today = config.today_str()
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT * FROM messages WHERE sender_number = ? OR phone_in_body LIKE ? "
+            "SELECT * FROM messages WHERE (sender_number = ? OR phone_in_body LIKE ?) "
+            "AND substr(COALESCE(NULLIF(msg_time, ''), created_at), 1, 10) = ? "
             "ORDER BY COALESCE(msg_time, created_at) DESC LIMIT ?",
-            (phone, f"%{phone}%", limit))
+            (phone, f"%{phone}%", today, limit))
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_record(record_id):
+    """按主键 ID 取单条记录（删除前用来拿 image_path）。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM messages WHERE id=?", (record_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def delete_record(record_id):
+    """按主键 ID 删除记录，返回是否删到。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute("DELETE FROM messages WHERE id=?", (record_id,))
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def log_query(chat_id, phone, message_id=None, package="", url="", found=True):
@@ -215,7 +229,7 @@ async def log_query(chat_id, phone, message_id=None, package="", url="", found=T
         await db.execute(
             "INSERT INTO query_logs (chat_id, phone, queried_at, message_id, package, url, found) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (chat_id, phone, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            (chat_id, phone, config.now_str(),
              message_id, package, url, 1 if found else 0))
         await db.commit()
 
