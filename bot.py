@@ -2,6 +2,7 @@
 
 - 识别群（role=source）：收图 → 下载 → OCR → 解析 → 入库 → 回复摘要。
 - 查询群（role=query）：输入手机号 → 命中则返回 图+手机号+网址。
+  同一号码当天上传几次就能查几次，FIFO 逐条认领，每条记录只会发给一个群。
 - 管理员：拉机器人进群时播报群 ID，并用按钮登记群角色。
 """
 import asyncio
@@ -142,24 +143,32 @@ async def _process_photo(path, user_id, user_name):
 @dp.message(F.text, ~F.text.startswith("/"))
 async def on_text(message: Message):
 
-    # 查询群：发号→查图、包号→数据包名；支持批量；全局去重，任何群命中过的号码不可再查
+    # 查询群：发号→查图、包号→数据包名；支持批量。
+    # 同一号码当天上传几次就能查几次（FIFO 逐条认领，哪群抢到归哪群，同一条记录不会被两群看到）
     if await db.get_group_role(message.chat.id) == "query":
         pairs = _parse_queries(message.text)
         if not pairs:
             return
         chat_id = message.chat.id
         for phone, package in pairs:
-            # 一个号码全局只允许查询一次：A群查过，B群就查不到
-            if await db.was_queried(phone):
-                await message.reply(f"手机号 {phone} 已被查询过。")
-                continue
             # 统计 = 本群「当天」查询次数 + 1（本次）：每天 0 点（上海）重置，命中与否、是否重复都计数
             today_start = f"{config.today_str()} 00:00:00"
             stats = await db.group_query_stats(chat_id, time_from=today_start)
             seq = stats["total"] + 1
-            first_msg_id, found, url = await _send_query_results(message, phone, seq)
-            # 命中与否都记录（未命中便于网页展示"未发送"）；未命中的后续补记录后仍可重查
-            await db.log_query(chat_id, phone, first_msg_id, package=package, url=url, found=found)
+            record = await db.claim_next_record(phone, chat_id)
+            if record is None:
+                total = await db.count_today_records(phone)
+                if total:
+                    sent = await message.reply(f"手机号 {phone} 今日已上传 {total} 次，查询次数已用完。")
+                else:
+                    sent = await message.reply(f"未找到手机号 {phone} 的相关记录。")
+                # 未命中/次数用完也记录（found=0），便于网页展示"未发送"
+                await db.log_query(chat_id, phone, sent.message_id if sent else None,
+                                   package=package, url="", found=False)
+                continue
+            msg_id = await _send_query_result(message, phone, record, seq)
+            await db.log_query(chat_id, phone, msg_id, package=package,
+                               url=(record.get("urls") or "").strip(), found=True)
         return
 
     # 私聊：兜底提示，保证私聊必有回应
@@ -416,25 +425,15 @@ def _parse_queries(text):
     return pairs
 
 
-async def _send_query_results(message: Message, phone: str, seq: int = 1):
-    """在查询群发送手机号查询结果，返回 (第一条消息 message_id, 是否命中, 命中记录的网址)。seq=本群第几次成功查询。"""
-    records = await db.search_by_phone(phone)
-    if not records:
-        sent = await message.reply(f"未找到手机号 {phone} 的相关记录。")
-        return (sent.message_id if sent else None), False, ""
-
-    url = (records[0].get("urls") or "").strip()
-    first_msg_id = None
-    for r in records:
-        caption = _format_query_result(phone, r, seq)
-        path = r.get("image_path")
-        if path and os.path.exists(path):
-            sent = await message.answer_photo(FSInputFile(path), caption=caption)
-        else:
-            sent = await message.reply(caption)
-        if first_msg_id is None and sent:
-            first_msg_id = sent.message_id
-    return first_msg_id, True, url
+async def _send_query_result(message: Message, phone: str, record: dict, seq: int = 1):
+    """发送一条已认领的查询记录（图+手机号+网址+统计），返回消息 message_id。"""
+    caption = _format_query_result(phone, record, seq)
+    path = record.get("image_path")
+    if path and os.path.exists(path):
+        sent = await message.answer_photo(FSInputFile(path), caption=caption)
+    else:
+        sent = await message.reply(caption)
+    return sent.message_id if sent else None
 
 
 def _format_summary(d):
