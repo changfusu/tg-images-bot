@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS messages (
     operator      TEXT,
     phone_in_body TEXT,
     content       TEXT,
+    note          TEXT,               -- 发图时附带的文字说明（Telegram 图片 caption）
     urls          TEXT,
     msg_time      TEXT,
     ocr_confidence REAL,
@@ -55,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_query_logs_phone ON query_logs(phone);
 CREATE INDEX IF NOT EXISTS idx_query_logs_chat_phone ON query_logs(chat_id, phone);
 """
 
-COLUMNS = ("sender_number", "operator", "phone_in_body", "content", "urls",
+COLUMNS = ("sender_number", "operator", "phone_in_body", "content", "note", "urls",
            "msg_time", "ocr_confidence", "raw_ocr", "image_path",
            "user_id", "user_name", "created_at")
 
@@ -106,7 +107,7 @@ async def _migrate_query_logs():
 
 
 async def _migrate_messages():
-    """迁移：为 messages 补齐老库缺失的列（consumed_at/consumed_chat_id）。"""
+    """迁移：为 messages 补齐老库缺失的列（consumed_at/consumed_chat_id/note）。"""
     async with aiosqlite.connect(config.DB_PATH) as db:
         cur = await db.execute("PRAGMA table_info(messages)")
         columns = {row[1] for row in await cur.fetchall()}
@@ -114,6 +115,8 @@ async def _migrate_messages():
             await db.execute("ALTER TABLE messages ADD COLUMN consumed_at TEXT")
         if "consumed_chat_id" not in columns:
             await db.execute("ALTER TABLE messages ADD COLUMN consumed_chat_id INTEGER")
+        if "note" not in columns:
+            await db.execute("ALTER TABLE messages ADD COLUMN note TEXT")
         await db.commit()
 
 

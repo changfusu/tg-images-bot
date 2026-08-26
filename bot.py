@@ -106,7 +106,9 @@ async def on_photo(message: Message):
 
     user_id = message.from_user.id
     user_name = message.from_user.full_name or message.from_user.username or str(message.from_user.id)
-    data = await _process_photo(path, user_id, user_name)
+    # 发图时附带的文字说明（Telegram caption），查询时随结果一并返回
+    note = (message.caption or "").strip()
+    data = await _process_photo(path, user_id, user_name, note)
     if data is None:
         await message.reply("未识别到手机号码，未保存。")
         return
@@ -114,8 +116,8 @@ async def on_photo(message: Message):
     await message.reply(_format_summary(data))
 
 
-async def _process_photo(path, user_id, user_name):
-    """OCR + 解析 + 入库。有手机号才保存；无手机号删图并返回 None。"""
+async def _process_photo(path, user_id, user_name, note=""):
+    """OCR + 解析 + 入库。有手机号才保存；无手机号删图并返回 None。note=发图附带的说明。"""
     # OCR + 解析是阻塞操作，丢线程池避免卡事件循环；
     # 加锁防止批量传图时多个线程同时使用 OCR 推理会话导致崩溃。
     async with _ocr_lock:
@@ -132,6 +134,7 @@ async def _process_photo(path, user_id, user_name):
     data = dict(result)
     data.update({
         "image_path": path,
+        "note": note,
         "user_id": user_id,
         "user_name": user_name,
         "created_at": _now_iso(),
@@ -446,11 +449,15 @@ def _format_summary(d):
 
 
 def _format_query_result(phone, r, seq=1):
-    """查询命中结果 caption：纯手机号 + 网址（如有）+ 本群累计查询成功次数。"""
+    """查询命中结果 caption：手机号 + 网址（如有）+ 说明（如有）+ 本群当天查询次数。"""
     parts = [phone]
     urls = (r.get("urls") or "").strip()
     if urls:
         parts.append(urls)
+    # 发图附带的说明文字，放在网址下一行
+    note = (r.get("note") or "").strip()
+    if note:
+        parts.append(note)
     parts.append(f"统计：{seq}")
     return "\n".join(parts)
 
