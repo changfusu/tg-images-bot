@@ -154,10 +154,11 @@ async def on_text(message: Message):
             return
         chat_id = message.chat.id
         for phone, package in pairs:
-            # 统计 = 本群「当天」查询次数 + 1（本次）：每天 0 点（上海）重置，命中与否、是否重复都计数
+            # 统计 = 本群「当天」已成功发送条数 + 1（本次）：每天 0 点（上海）重置。
+            # 只数命中（received），未命中/次数已用完不占序号，保证显示序号连续自增 1。
             today_start = f"{config.today_str()} 00:00:00"
             stats = await db.group_query_stats(chat_id, time_from=today_start)
-            seq = stats["total"] + 1
+            seq = stats["received"] + 1
             record = await db.claim_next_record(phone, chat_id)
             if record is None:
                 total = await db.count_today_records(phone)
