@@ -1,11 +1,13 @@
 """FastAPI 网页：表格页 + 搜索筛选 + CSV/Excel 导出 + 群查询日志。"""
+import base64
 import csv
 import io
 import os
 import re
+import secrets
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
@@ -17,6 +19,25 @@ app = FastAPI(title="短信识别台账")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 OPERATORS = ["中国移动", "中国联通", "中国电信", "其他"]
+
+
+@app.middleware("http")
+async def basic_auth(request: Request, call_next):
+    """Basic Auth 闸门：WEB_PASSWORD 未配置时放行（本机调试），/health 始终放行给健康检查。"""
+    if not config.WEB_PASSWORD or request.url.path == "/health":
+        return await call_next(request)
+    ok = False
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            user, _, pw = base64.b64decode(auth[6:]).decode("utf-8").partition(":")
+            ok = (secrets.compare_digest(user, config.WEB_USER)
+                  and secrets.compare_digest(pw, config.WEB_PASSWORD))
+        except Exception:
+            ok = False
+    if not ok:
+        return Response(status_code=401, headers={"WWW-Authenticate": "Basic"})
+    return await call_next(request)
 COLS = (("msg_time", "短信时间"), ("sender_number", "发件号码"), ("operator", "运营商"),
         ("phone_in_body", "正文号码"), ("content", "信息内容"), ("urls", "网址"),
         ("user_name", "上传人"), ("created_at", "上传时间"))

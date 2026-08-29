@@ -20,6 +20,10 @@ ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if 
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
 
+# 网页台账 Basic Auth；WEB_PASSWORD 留空 = 不启用鉴权（仅限本机调试）
+WEB_USER = os.getenv("WEB_USER", "admin")
+WEB_PASSWORD = os.getenv("WEB_PASSWORD", "")
+
 DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data")))
 IMAGES_DIR = DATA_DIR / "images"
 DB_PATH = DATA_DIR / "bot.db"
