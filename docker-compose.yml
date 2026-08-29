@@ -2,7 +2,7 @@ services:
   app:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"        # 只绑回环，不对公网开放；网页走 SSH 隧道访问
     env_file:
       - .env
     volumes:
