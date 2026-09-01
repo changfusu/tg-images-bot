@@ -43,16 +43,16 @@ def _resize_for_ocr(path, max_side=1280):
     from PIL import Image
 
     try:
-        img = Image.open(path)
+        with Image.open(path) as im:
+            w, h = im.size
+            if max(w, h) <= max_side:
+                return path
+            scale = max_side / max(w, h)
+            new_size = (int(w * scale), int(h * scale))
+            # ponytail: Pillow 各版本兼容，不用 Image.Resampling
+            img = im.resize(new_size, Image.LANCZOS)
     except Exception:
         return path
-    w, h = img.size
-    if max(w, h) <= max_side:
-        return path
-    scale = max_side / max(w, h)
-    new_size = (int(w * scale), int(h * scale))
-    # ponytail: Pillow 各版本兼容，不用 Image.Resampling
-    img = img.resize(new_size, Image.LANCZOS)
     base, ext = os.path.splitext(path)
     resized_path = f"{base}_resized{ext}"
     img.save(resized_path)

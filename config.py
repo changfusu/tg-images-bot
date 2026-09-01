@@ -11,14 +11,23 @@ load_dotenv(BASE_DIR / ".env")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
+def _parse_ids(env_name):
+    """解析逗号分隔的用户 ID 列表；非法条目跳过，避免配置笔误导致应用起不来。"""
+    return {int(x) for x in (s.strip() for s in os.getenv(env_name, "").split(","))
+            if x.lstrip("-").isdigit()}
+
+
 # 白名单用户 ID，逗号分隔；留空 = 允许所有人（多人使用）
-ALLOWED_USER_IDS = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip()}
+ALLOWED_USER_IDS = _parse_ids("ALLOWED_USER_IDS")
 
 # 管理员用户 ID，逗号分隔；留空 = 无管理员（无法增删群/登记角色）
-ADMIN_USER_IDS = {int(x) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()}
+ADMIN_USER_IDS = _parse_ids("ADMIN_USER_IDS")
 
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
-WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
+try:
+    WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
+except ValueError:
+    WEB_PORT = 8000
 
 # 网页台账 Basic Auth；WEB_PASSWORD 留空 = 不启用鉴权（仅限本机调试）
 WEB_USER = os.getenv("WEB_USER", "admin")

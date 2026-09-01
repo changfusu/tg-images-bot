@@ -207,15 +207,19 @@ async def is_db_admin(user_id) -> bool:
         return await cur.fetchone() is not None
 
 
-async def claim_next_record(phone, chat_id):
-    """FIFO 认领：把该号码当天最早一条未查记录标记为已查并返回它；无可认领的返回 None。
+async def claim_and_log(phone, chat_id, package):
+    """单事务完成：FIFO 认领 + 写查询日志 + 取本群当天序号，三者原子。
 
-    UPDATE...RETURNING 是单条原子语句，多个群同时查同一号码也不会抢到同一条记录，
-    天然保证「A群查过的记录，B群查不到」。只认「当天」（上海时区，凌晨 0 点为界）。
+    BEGIN IMMEDIATE 让并发查询串行化：认领不会抢到同一条记录，序号也不会重复
+    （序号 = 本群当天 found=1 日志数 + 1，与日志写入同事务）。
+    返回 (record 或 None, seq, log_id)；message_id 由 update_query_log 在发送后回填，
+    发送失败时调用方负责 release_claim + update_query_log(found=0)。
+    只认「当天」（上海时区，凌晨 0 点为界）。
     """
     today = config.today_str()
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute(
             "UPDATE messages SET consumed_at = ?, consumed_chat_id = ? "
             "WHERE id = (SELECT id FROM messages WHERE (sender_number = ? OR phone_in_body LIKE ?) "
@@ -225,8 +229,29 @@ async def claim_next_record(phone, chat_id):
             "RETURNING *",
             (config.now_str(), chat_id, phone, f"%{phone}%", today))
         row = await cur.fetchone()
+        record = dict(row) if row else None
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM query_logs WHERE chat_id = ? AND queried_at >= ? AND found = 1",
+            (chat_id, f"{today} 00:00:00"))
+        seq = (await cur.fetchone())[0] + 1
+        cur = await db.execute(
+            "INSERT INTO query_logs (chat_id, phone, queried_at, message_id, package, url, found) "
+            "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+            (chat_id, phone, config.now_str(), package,
+             (record["urls"] or "").strip() if record else "",
+             1 if record else 0))
+        log_id = cur.lastrowid
         await db.commit()
-        return dict(row) if row else None
+        return record, seq, log_id
+
+
+async def update_query_log(log_id, message_id=None, found=True):
+    """发送后回填日志的消息 ID 与命中状态（发送失败时 found=False）。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "UPDATE query_logs SET message_id=?, found=? WHERE id=?",
+            (message_id, 1 if found else 0, log_id))
+        await db.commit()
 
 
 async def count_today_records(phone):
@@ -265,17 +290,6 @@ async def delete_record(record_id):
         cur = await db.execute("DELETE FROM messages WHERE id=?", (record_id,))
         await db.commit()
         return cur.rowcount > 0
-
-
-async def log_query(chat_id, phone, message_id=None, package="", url="", found=True):
-    """记录一次查询：手机号、包号（数据包名）、命中网址、是否命中，以及返回结果的第一条消息 ID。"""
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO query_logs (chat_id, phone, queried_at, message_id, package, url, found) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (chat_id, phone, config.now_str(),
-             message_id, package, url, 1 if found else 0))
-        await db.commit()
 
 
 async def query_group_queries(chat_id, time_from="", time_to="", limit=200, offset=0):

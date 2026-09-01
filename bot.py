@@ -35,10 +35,11 @@ class LogMiddleware(BaseMiddleware):
         # dp.update 层的 event 是原始 Update 对象
         m = getattr(event, "message", None)
         if m is not None:
+            # 只记来源，不记消息文本（含手机号等 PII，不应留在 docker logs）
             uid = m.from_user.id if m.from_user else "?"
-            print(f"[update] Message chat_id={m.chat.id} from={uid} text={m.text!r}", flush=True)
+            print(f"[update] Message chat_id={m.chat.id} from={uid}", flush=True)
         elif getattr(event, "callback_query", None):
-            print(f"[update] CallbackQuery data={event.callback_query.data!r}", flush=True)
+            print(f"[update] CallbackQuery from={event.callback_query.from_user.id}", flush=True)
         elif getattr(event, "my_chat_member", None):
             print(f"[update] my_chat_member chat_id={event.my_chat_member.chat.id}", flush=True)
         else:
@@ -85,6 +86,10 @@ async def on_photo(message: Message):
     chat_type = message.chat.type
     print(f"[on_photo] 收到图片 chat_id={chat_id} type={chat_type}", flush=True)
 
+    # 白名单（.env ALLOWED_USER_IDS）非空时，仅放行列表内用户
+    if not config.is_allowed(message.from_user.id if message.from_user else 0):
+        return
+
     # 仅识别群发图才处理；私聊发图给提示
     if await db.get_group_role(chat_id) != "source":
         print(f"[on_photo] 群 {chat_id} 不是识别群，跳过", flush=True)
@@ -108,7 +113,18 @@ async def on_photo(message: Message):
     user_name = message.from_user.full_name or message.from_user.username or str(message.from_user.id)
     # 发图时附带的文字说明（Telegram caption），查询时随结果一并返回
     note = (message.caption or "").strip()
-    data = await _process_photo(path, user_id, user_name, note)
+    data = None
+    try:
+        data = await _process_photo(path, user_id, user_name, note)
+    except Exception as e:
+        # OCR/入库失败：删掉已下载的图片避免孤儿文件，并告知用户
+        print(f"[on_photo] 处理失败 err={type(e).__name__}", flush=True)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        await message.reply("图片处理失败，请重发。")
+        return
     if data is None:
         await message.reply("未识别到手机号码，未保存。")
         return
@@ -123,8 +139,8 @@ async def _process_photo(path, user_id, user_name, note=""):
     async with _ocr_lock:
         result = await asyncio.to_thread(_ocr_and_parse, path)
 
-    print(f"[_process_photo] OCR 原始文本：{result.get('raw_ocr', '')[:200]!r}", flush=True)
-    print(f"[_process_photo] 解析结果：phones={result.get('phone_in_body')!r} urls={result.get('urls')!r}", flush=True)
+    # 不打印 OCR 原文与号码（PII 不应留在 docker logs），只记数量
+    print(f"[_process_photo] 识别完成：手机号 {len(_phones_from_result(result))} 个", flush=True)
 
     # 只认手机号：识别不到手机号的一律不保存
     if not _phones_from_result(result):
@@ -149,43 +165,39 @@ async def on_text(message: Message):
     # 查询群：发号→查图、包号→数据包名；支持批量。
     # 同一号码当天上传几次就能查几次（FIFO 逐条认领，哪群抢到归哪群，同一条记录不会被两群看到）
     if await db.get_group_role(message.chat.id) == "query":
+        # 白名单非空时仅放行列表内用户
+        if not config.is_allowed(message.from_user.id if message.from_user else 0):
+            return
         pairs = _parse_queries(message.text)
         if not pairs:
             return
         chat_id = message.chat.id
         for phone, package in pairs:
-            # 统计 = 本群「当天」已成功发送条数 + 1（本次）：每天 0 点（上海）重置。
-            # 只数命中（received），未命中/次数已用完不占序号，保证显示序号连续自增 1。
-            today_start = f"{config.today_str()} 00:00:00"
-            stats = await db.group_query_stats(chat_id, time_from=today_start)
-            seq = stats["received"] + 1
-            record = await db.claim_next_record(phone, chat_id)
+            # 认领 + 当天序号 + 日志在同一事务完成（BEGIN IMMEDIATE），并发查询不会产生重复序号；
+            # 只数命中（found=1），未命中/次数已用完不占序号，保证显示序号连续自增 1。
+            record, seq, log_id = await db.claim_and_log(phone, chat_id, package)
             if record is None:
                 total = await db.count_today_records(phone)
                 if total:
                     sent = await message.reply(f"手机号 {phone} 今日已上传 {total} 次，查询次数已用完。")
                 else:
                     sent = await message.reply(f"未找到手机号 {phone} 的相关记录。")
-                # 未命中/次数用完也记录（found=0），便于网页展示"未发送"
-                await db.log_query(chat_id, phone, sent.message_id if sent else None,
-                                   package=package, url="", found=False)
+                await db.update_query_log(log_id, sent.message_id if sent else None, found=False)
                 continue
-            url = (record.get("urls") or "").strip()
             try:
                 msg_id = await _send_query_result(message, phone, record, seq)
             except Exception as e:
                 # 发送失败（如 caption 超长、图片损坏）：撤销认领并记为未发送，
                 # 否则记录已被 consumed 却永远发不出去，且中断同批后续号码
-                print(f"[on_text] 发送查询结果失败 phone={phone} err={e!r}", flush=True)
+                print(f"[on_text] 发送查询结果失败 record={record['id']} err={type(e).__name__}", flush=True)
                 await db.release_claim(record["id"])
-                await db.log_query(chat_id, phone, package=package, url=url, found=False)
+                await db.update_query_log(log_id, found=False)
                 try:
                     await message.reply(f"手机号 {phone} 查询结果发送失败，请稍后重试。")
                 except Exception:
                     pass
                 continue
-            await db.log_query(chat_id, phone, msg_id, package=package,
-                               url=url, found=True)
+            await db.update_query_log(log_id, msg_id, found=True)
         return
 
     # 私聊：兜底提示，保证私聊必有回应
@@ -376,7 +388,12 @@ async def on_callback(cb: CallbackQuery):
     action = parts[0]
 
     if action == "role" and len(parts) >= 3:
-        role, cid = parts[1], int(parts[2])
+        try:
+            cid = int(parts[2])
+        except ValueError:
+            await cb.answer("数据异常，已忽略。", show_alert=True)
+            return
+        role = parts[1]
         try:
             chat = await cb.bot.get_chat(cid)
             title = chat.title or str(cid)
@@ -386,7 +403,11 @@ async def on_callback(cb: CallbackQuery):
         if cb.message:
             await cb.message.edit_text(f"✅ 已登记群「{title}」为{_role_label(role)}。")
     elif action == "del" and len(parts) >= 2:
-        cid = int(parts[1])
+        try:
+            cid = int(parts[1])
+        except ValueError:
+            await cb.answer("数据异常，已忽略。", show_alert=True)
+            return
         await db.delete_group(cid)
         if cb.message:
             await cb.message.edit_text(f"已删除群 {cid} 的登记。")
@@ -428,7 +449,8 @@ def _parse_queries(text):
     """解析查询消息，返回 [(phone, package), ...]，按出现顺序去重手机号。
 
     优先按「发号：…」取号；没有发号标记时兼容旧的纯手机号批量查询。
-    包号按顺序与发号配对，缺省用最后一个包号（同一批常为同包）。
+    包号先按位置与发号一一配对，再按手机号去重（先去重再配对会让重复号后面的包号错位）。
+    缺省用最后一个包号（同一批常为同包）。
     """
     phones = FA_HAO_RE.findall(text) or _unique_phones(text)
     pkgs = BAO_HAO_RE.findall(text)

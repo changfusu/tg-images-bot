@@ -33,9 +33,9 @@
   <a href="/">重置</a>
 </form>
 <p>
-  <a href="/export?fmt=csv&q={{ q }}&operator={{ operator }}&frm={{ frm }}&to={{ to }}">导出 CSV</a>
+  <a href="/export?fmt=csv&q={{ q|urlencode }}&operator={{ operator|urlencode }}&frm={{ frm }}&to={{ to }}">导出 CSV</a>
   ·
-  <a href="/export?fmt=xlsx&q={{ q }}&operator={{ operator }}&frm={{ frm }}&to={{ to }}">导出 Excel</a>
+  <a href="/export?fmt=xlsx&q={{ q|urlencode }}&operator={{ operator|urlencode }}&frm={{ frm }}&to={{ to }}">导出 Excel</a>
 </p>
 <table>
   <thead>
@@ -62,9 +62,9 @@
   </tbody>
 </table>
 <div class="pager">
-  {% if page > 1 %}<a href="?q={{ q }}&operator={{ operator }}&frm={{ frm }}&to={{ to }}&page={{ page-1 }}">上一页</a>{% endif %}
+  {% if page > 1 %}<a href="?q={{ q|urlencode }}&operator={{ operator|urlencode }}&frm={{ frm }}&to={{ to }}&page={{ page-1 }}">上一页</a>{% endif %}
   第 {{ page }} / {{ pages }} 页
-  {% if page < pages %}<a href="?q={{ q }}&operator={{ operator }}&frm={{ frm }}&to={{ to }}&page={{ page+1 }}">下一页</a>{% endif %}
+  {% if page < pages %}<a href="?q={{ q|urlencode }}&operator={{ operator|urlencode }}&frm={{ frm }}&to={{ to }}&page={{ page+1 }}">下一页</a>{% endif %}
 </div>
 </body>
 </html>
