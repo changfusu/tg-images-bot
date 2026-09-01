@@ -241,6 +241,15 @@ async def count_today_records(phone):
         return row[0]
 
 
+async def release_claim(record_id):
+    """撤销认领：发送结果失败时把记录还原为未查，避免记录被静默消耗。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "UPDATE messages SET consumed_at=NULL, consumed_chat_id=NULL WHERE id=?",
+            (record_id,))
+        await db.commit()
+
+
 async def get_record(record_id):
     """按主键 ID 取单条记录（删除前用来拿 image_path）。"""
     async with aiosqlite.connect(config.DB_PATH) as db:

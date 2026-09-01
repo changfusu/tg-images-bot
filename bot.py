@@ -170,9 +170,22 @@ async def on_text(message: Message):
                 await db.log_query(chat_id, phone, sent.message_id if sent else None,
                                    package=package, url="", found=False)
                 continue
-            msg_id = await _send_query_result(message, phone, record, seq)
+            url = (record.get("urls") or "").strip()
+            try:
+                msg_id = await _send_query_result(message, phone, record, seq)
+            except Exception as e:
+                # 发送失败（如 caption 超长、图片损坏）：撤销认领并记为未发送，
+                # 否则记录已被 consumed 却永远发不出去，且中断同批后续号码
+                print(f"[on_text] 发送查询结果失败 phone={phone} err={e!r}", flush=True)
+                await db.release_claim(record["id"])
+                await db.log_query(chat_id, phone, package=package, url=url, found=False)
+                try:
+                    await message.reply(f"手机号 {phone} 查询结果发送失败，请稍后重试。")
+                except Exception:
+                    pass
+                continue
             await db.log_query(chat_id, phone, msg_id, package=package,
-                               url=(record.get("urls") or "").strip(), found=True)
+                               url=url, found=True)
         return
 
     # 私聊：兜底提示，保证私聊必有回应
