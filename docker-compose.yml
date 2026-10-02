@@ -9,6 +9,8 @@ services:
       - ./data:/app/data                 # SQLite + 原图持久化
     restart: unless-stopped
     shm_size: "2g"                       # OCR 推理共享内存余量
+    mem_limit: 4g                        # 内存上限，超限触发 OOM 后由 restart 策略拉起
+    memswap_limit: 4g                    # 禁用 swap，避免超限后拖慢宿主机
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 30s
